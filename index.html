@@ -136,9 +136,9 @@ function SalesLog() {
       }
 
       setStatus({ type: "saving", msg: "구글 시트에 저장 중..." });
-      fetch(SCRIPT_URL, {
-        method: "POST", mode: "no-cors",
-        headers: { "Content-Type": "application/json" },
+      fetch(PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Target": "sheets" },
         body: JSON.stringify(parsed),
       });
 
