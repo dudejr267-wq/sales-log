@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>영업일지</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { background: #f8f9fa; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(232,69,60,.35)} 50%{box-shadow:0 0 0 14px rgba(232,69,60,0)} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx-Wt39auw3Q01EqSJ5Gk8vLNebOK6-p_zRfC3hL27fN-LsqpODnT2xjZ16DcouGoxF/exec";
+
+const BRANDS = [
+  { key: "ourmill", label: "아워밀" },
+  { key: "nyamnyami", label: "냠냐미" },
+  { key: "ansimchan", label: "안심찬" },
+  { key: "olbareun", label: "올바른" },
+];
+
+const REACTION_COLORS = {
+  "매우 좋음": { bg: "#EAF3DE", color: "#27500A" },
+  "좋음": { bg: "#E6F1FB", color: "#0C447C" },
+  "보통": { bg: "#FAEEDA", color: "#633806" },
+  "부정적": { bg: "#FCEBEB", color: "#791F1F" },
+};
+
+const DAY_NAMES = ["일", "월", "화", "수", "목", "금", "토"];
+
+function SalesLog() {
+  const [inputText, setInputText] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [interimText, setInterimText] = useState("");
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [status, setStatus] = useState(null);
+  const [result, setResult] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SR) setSpeechSupported(true);
+  }, []);
+
+  function toggleMic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert("Safari에서 열어주세요."); return; }
+
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      setInterimText("");
+      return;
+    }
+
+    const rec = new SR();
+    rec.lang = "ko-KR";
+    rec.continuous = true;
+    rec.interimResults = true;
+
+    rec.onstart = () => setIsListening(true);
+    rec.onresult = (e) => {
+      let final = "", interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t;
+        else interim += t;
+      }
+      if (final) setInputText((p) => p + final);
+      setInterimText(interim);
+    };
+    rec.onerror = (e) => {
+      setIsListening(false);
+      setInterimText("");
+      if (e.error !== "aborted") alert("마이크 오류: " + e.error);
+    };
+    rec.onend = () => { setIsListening(false); setInterimText(""); };
+    recognitionRef.current = rec;
+    rec.start();
+  }
+
+  async function submitLog() {
+    if (!inputText.trim()) { alert("내용을 입력해주세요."); return; }
+    if (isListening) { recognitionRef.current?.stop(); setIsListening(false); }
+    setLoading(true);
+    setStatus({ type: "analyzing", msg: "Claude가 분석 중..." });
+
+    const today = new Date().toISOString().split("T")[0];
+    const sys = `학교 급식 영업사원의 구어체 일지를 JSON으로만 변환하세요. JSON만 출력. 마크다운 없이.
+브랜드: 아워밀(ourmill), 냠냐미(nyamnyami), 안심찬(ansimchan), 올바른(olbareun)
+반응: "매우 좋음"/"좋음"/"보통"/"부정적" 중 하나.
+날짜 미언급시 ${today}. 다음방문 요일 언급시 날짜로 계산.
+성과 별점은 전반 분위기로 ★1~5개.
+{"date":"","schools":"","nutritionist":"","ourmill_product":"","ourmill_qty":"","ourmill_reaction":"","ourmill_memo":"","nyamnyami_product":"","nyamnyami_qty":"","nyamnyami_reaction":"","nyamnyami_memo":"","ansimchan_product":"","ansimchan_qty":"","ansimchan_reaction":"","ansimchan_memo":"","olbareun_product":"","olbareun_qty":"","olbareun_reaction":"","olbareun_memo":"","consult":"","needs":"","stars":"","next_date":"","next_goal":"","extra":""}`;
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: sys,
+          messages: [{ role: "user", content: inputText }],
+        }),
+      });
+      const data = await res.json();
+      const raw = (data.content || []).map((c) => c.text || "").join("");
+      const parsed = JSON.parse(raw.replace(/```json|```/g, "").trim());
+
+      setStatus({ type: "saving", msg: "구글 시트에 저장 중..." });
+      await fetch(SCRIPT_URL, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+
+      setResult(parsed);
+      setHistory((h) => [parsed, ...h]);
+      setInputText("");
+      setStatus({ type: "done", msg: "✓ 구글 시트에 저장 완료!" });
+      setTimeout(() => setStatus(null), 3000);
+    } catch (e) {
+      setStatus({ type: "err", msg: "오류: " + e.message });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function formatDate(d) {
+    const dt = new Date(d);
+    return isNaN(dt) ? d : `${d} (${DAY_NAMES[dt.getDay()]})`;
+  }
+
+  const statusColors = {
+    analyzing: { bg: "#f1f3f4", color: "#5f6368" },
+    saving: { bg: "#E6F1FB", color: "#185FA5" },
+    done: { bg: "#EAF3DE", color: "#27500A" },
+    err: { bg: "#FCEBEB", color: "#791F1F" },
+  };
+
+  const card = { background: "#fff", borderRadius: 16, padding: 16, marginBottom: 12, border: "1px solid #e8eaed" };
+  const secTitle = { fontSize: 11, fontWeight: 600, color: "#9aa0a6", letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 12 };
+  const rowSt = { display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 0", borderBottom: "1px solid #f1f3f4" };
+  const labelSt = { fontSize: 13, color: "#9aa0a6", minWidth: 56, paddingTop: 1 };
+  const valSt = { fontSize: 13, color: "#202124", flex: 1, lineHeight: 1.5 };
+  const pill = (bg, color) => ({ display: "inline-block", fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 10, background: bg, color, marginRight: 4, marginBottom: 2 });
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "20px 16px 60px", minHeight: "100vh" }}>
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, color: "#202124" }}>영업일지</div>
+        <div style={{ fontSize: 12, color: "#9aa0a6", marginTop: 3 }}>아워밀 · 냠냐미 · 안심찬 · 올바른</div>
+      </div>
+
+      <div style={card}>
+        <div style={secTitle}>오늘 영업 내용</div>
+
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <button
+            onClick={toggleMic}
+            style={{
+              width: 72, height: 72, borderRadius: "50%", border: "none", cursor: "pointer",
+              background: isListening ? "#e8453c" : "#1a73e8",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              animation: isListening ? "pulse 1.2s infinite" : "none",
+              transition: "background .2s",
+              WebkitAppearance: "none",
+            }}
+          >
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="white">
+              {isListening
+                ? <path d="M6 6h12v12H6z"/>
+                : <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 16.93V20H9v2h6v-2h-2v-2.07A8 8 0 0 0 20 11h-2a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93z"/>
+              }
+            </svg>
+          </button>
+          <div style={{ fontSize: 13, color: isListening ? "#e8453c" : "#9aa0a6", fontWeight: isListening ? 600 : 400, textAlign: "center" }}>
+            {isListening ? "듣는 중... 탭하면 중지" : speechSupported ? "마이크를 탭해서 말하세요" : "아래에 직접 입력해주세요"}
+          </div>
+          {isListening && interimText && (
+            <div style={{ width: "100%", padding: "8px 12px", borderRadius: 8, background: "#f8f9fa", fontSize: 13, color: "#9aa0a6", fontStyle: "italic", lineHeight: 1.5 }}>
+              {interimText}
+            </div>
+          )}
+        </div>
+
+        <textarea
+          value={inputText}
+          onChange={(e) => setInputText(e.target.value)}
+          placeholder={"예) 오늘 덕계초 방문했어. 김영양 선생님 만났고,\n아워밀 현미밥 샘플링했는데 반응 엄청 좋았어.\n냠냐미 떡갈비는 보통이었어.\n다음 주 화요일에 또 가기로 했어."}
+          rows={4}
+          style={{ width: "100%", padding: "11px 12px", borderRadius: 10, border: "1px solid #dadce0", fontSize: 14, lineHeight: 1.6, resize: "none", outline: "none", color: "#202124", background: "#fff" }}
+        />
+
+        <button
+          onClick={submitLog}
+          disabled={loading}
+          style={{ width: "100%", marginTop: 10, padding: 14, borderRadius: 10, border: "none", background: loading ? "#9aa0a6" : "#1a73e8", color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", WebkitAppearance: "none" }}
+        >
+          {loading ? "처리 중..." : "분석 · 자동 저장"}
+        </button>
+
+        {status && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, padding: "10px 12px", borderRadius: 10, fontSize: 13, fontWeight: 500, background: statusColors[status.type]?.bg, color: statusColors[status.type]?.color }}>
+            {(status.type === "analyzing" || status.type === "saving") && (
+              <div style={{ width: 12, height: 12, borderRadius: "50%", border: "2px solid currentColor", borderTopColor: "transparent", animation: "spin .7s linear infinite", flexShrink: 0 }} />
+            )}
+            {status.msg}
+          </div>
+        )}
+      </div>
+
+      {result && (
+        <div style={card}>
+          <div style={secTitle}>저장된 일지</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #f1f3f4" }}>
+            <div style={{ width: 42, height: 42, borderRadius: "50%", background: "#E6F1FB", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 600, color: "#185FA5", flexShrink: 0 }}>
+              {(result.nutritionist || "??").replace("선생님", "").trim().slice(0, 2)}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#202124" }}>
+                {result.nutritionist ? result.nutritionist + (result.nutritionist.includes("선생님") ? "" : " 선생님") : "담당자 미상"}
+              </div>
+              <div style={{ fontSize: 12, color: "#9aa0a6", marginTop: 2 }}>{result.schools || "-"}</div>
+            </div>
+            <div style={{ fontSize: 12, color: "#bdc1c6" }}>{result.date}</div>
+          </div>
+
+          {BRANDS.filter((b) => result[b.key + "_product"] || result[b.key + "_reaction"]).map((b) => {
+            const reaction = result[b.key + "_reaction"];
+            const rc = REACTION_COLORS[reaction] || { bg: "#f1f3f4", color: "#5f6368" };
+            return (
+              <div key={b.key} style={rowSt}>
+                <div style={labelSt}>샘플링</div>
+                <div style={valSt}>
+                  <span style={pill("#E6F1FB", "#0C447C")}>{b.label}</span>
+                  {result[b.key + "_product"]}
+                  {reaction && <span style={pill(rc.bg, rc.color)}>{reaction}</span>}
+                  {result[b.key + "_memo"] && <span style={{ color: "#9aa0a6" }}> — {result[b.key + "_memo"]}</span>}
+                </div>
+              </div>
+            );
+          })}
+          {result.stars && <div style={{...rowSt, alignItems:"center"}}><div style={labelSt}>성과</div><div style={{ fontSize: 18, color: "#EF9F27", letterSpacing: 2 }}>{result.stars}</div></div>}
+          {result.next_date && <div style={{...rowSt, alignItems:"center"}}><div style={labelSt}>다음방문</div><div style={valSt}>{formatDate(result.next_date)}{result.next_goal ? " — " + result.next_goal : ""}</div></div>}
+          {result.consult && <div style={rowSt}><div style={labelSt}>상담</div><div style={valSt}>{result.consult}</div></div>}
+          {result.needs && <div style={{...rowSt, borderBottom:"none"}}><div style={labelSt}>니즈</div><div style={valSt}>{result.needs}</div></div>}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div style={card}>
+          <div style={secTitle}>저장 내역</div>
+          {history.map((h, i) => (
+            <div key={i} style={{ display: "flex", gap: 10, padding: "8px 0", borderBottom: i < history.length - 1 ? "1px solid #f1f3f4" : "none" }}>
+              <div style={{ fontSize: 12, color: "#bdc1c6", minWidth: 78, paddingTop: 2 }}>{h.date}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: "#202124" }}>{h.schools} · {h.nutritionist}선생님</div>
+                <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {BRANDS.filter((b) => h[b.key + "_product"]).map((b) => (
+                    <span key={b.key} style={pill("#E6F1FB", "#0C447C")}>{b.label} {h[b.key + "_product"]}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<SalesLog />);
+</script>
+</body>
+</html>
